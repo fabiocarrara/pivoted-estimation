@@ -35,8 +35,8 @@ def prepare(features, pivots, args):
     invs1 = np.argsort(s1)
     invs2 = np.argsort(s2)
 
-    o1 = torch.from_numpy(features[o1[s1], ...][invs1]).cuda()
-    o2 = torch.from_numpy(features[o2[s2], ...][invs2]).cuda()
+    o1 = torch.from_numpy(features[o1[s1], ...][invs1]).to(args.device)
+    o2 = torch.from_numpy(features[o2[s2], ...][invs2]).to(args.device)
 
     # euclidean distances
     target = torch.pow(o1 - o2, 2).sum(1, keepdim=True)
@@ -63,10 +63,6 @@ def train(features, pivots, model, optimizer, args):
     progress = trange(steps)
     for it in progress:
         o1, o2, d = prepare(features, pivots, args)
-        o1, o2, d = \
-            V(o1, requires_grad=False).cuda(), \
-            V(o2, requires_grad=False).cuda(), \
-            V(d, requires_grad=False).cuda()
 
         emb1, emb2 = model(o1), model(o2)
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
@@ -94,21 +90,15 @@ def train(features, pivots, model, optimizer, args):
 def evaluate(features, pivots, model, args):
     model.eval()
 
-    steps = (args.accumulate // args.batch_size) * args.val_iterations
-    progress = trange(steps)
-    
     real = []
     estimates = []
-    
-    for _ in progress:
+
+    steps = (args.accumulate // args.batch_size) * args.val_iterations
+    for _ in trange(steps):
         o1, o2, d = prepare(features, pivots, args)
-        o1, o2, d = o1.cuda(), o2.cuda(), d.cuda()
+        o1, o2, d = o1.to(args.device), o2.to(args.device), d.to(args.device)
         
         real.append(d)
-        
-        o1, o2, d = V(o1, volatile=True), \
-                    V(o2, volatile=True), \
-                    V(d, volatile=True)
 
         emb1, emb2 = model(o1), model(o2)
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
@@ -157,7 +147,8 @@ def main(args):
                'do{0[dropout]}_' \
                'lr{0[lr]}_' \
                'i{0[iterations]}_' \
-               'p{0[pivot_seed]}'.format(params)
+               'p{0[pivot_seed]}_' \
+               's[0[seed]'.format(params)
 
     run_dir = os.path.join(args.runs, run_name)
     ckpt_dir = os.path.join(run_dir, 'ckpt')
@@ -183,17 +174,20 @@ def main(args):
     pivots = torch.from_numpy(pivots).cuda()
 
     # Build the model
-    layers = [
-        nn.Linear(args.dimensionality, args.dimensionality)
-    ]
+    layers = []
     
-    for i in range(args.layers):
-        layers.append(nn.ReLU())
-        if args.dropout:
-            layers.append(nn.Dropout(args.dropout))
-        layers.append(nn.Linear(args.dimensionality, args.dimensionality))
+    for i in range(args.layers - 1):
+        layers.extend([
+            nn.Linear(args.dimensionality, args.dimensionality),
+            nn.ReLU()
+        ])
+
+    if args.dropout:
+        layers.append(nn.Dropout(args.dropout))
+
+    layers.append(nn.Linear(args.dimensionality, args.dimensionality))
         
-    model = nn.Sequential(*layers).cuda()
+    model = nn.Sequential(*layers).to(args.device)
     optimizer = Adam(model.parameters(), lr=args.lr)
 
     # Train loop
@@ -276,11 +270,24 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--layers', type=int, default=2, help='Number of hidden layers')
     parser.add_argument('-o', '--dropout', type=float, default=0.0, help='Dropout probability for hidden layers')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('-s', '--seed', type=int, default=23, help='Random initial seed')
+
     parser.add_argument('-r', '--runs', type=str, default='runs/', help='Base dir for runs')
     parser.add_argument('--resume', action='store_true', dest='resume', help='Resume training')
     parser.add_argument('--metrics', action='store_true', dest='metrics', help='Compute metrics and exit (to be used with --resume)')
+    parser.add_argument('--no-cuda', action='store_true', help='Run without CUDA')
+
     parser.set_defaults(resume=False)
     parser.set_defaults(metrics=False)
+    parser.set_defaults(no_cuda=False)
     args = parser.parse_args()
+
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+
+    args.device = torch.device('cpu')
+    if not args.no_cuda and torch.cuda.is_available():
+        args.device = torch.device('cuda')
 
     main(args)
