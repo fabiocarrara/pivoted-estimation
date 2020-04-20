@@ -3,7 +3,6 @@ import gzip
 import h5py
 import numpy as np
 
-from scipy.sparse import csr_matrix, lil_matrix
 from sklearn.preprocessing import normalize
 from tqdm import tqdm
 
