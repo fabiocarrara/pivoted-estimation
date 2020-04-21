@@ -10,7 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch.optim import Adam
+from torch.optim import SGD, Adam
+from torch.optim.lr_scheduler import LambdaLR, CyclicLR
 from tqdm import trange
 
 from model import get_model
@@ -59,7 +60,7 @@ def prepare(features, pivots, args):
     return o1, o2, target
 
 
-def train(features, pivots, model, optimizer, args):
+def train(features, pivots, model, optimizer, scheduler, args):
     model.train()
     optimizer.zero_grad()
 
@@ -88,6 +89,7 @@ def train(features, pivots, model, optimizer, args):
         if (it + 1) % steps_for_update:
             optimizer.step()
             optimizer.zero_grad()
+            scheduler.step()
                 
         real.append(d.cpu())
         estimates.append(dd.detach().cpu())
@@ -167,7 +169,18 @@ def main(args):
 
     # Build the model
     model = get_model(args).to(args.device)
-    optimizer = Adam(model.parameters(), lr=args.lr)
+    
+    # Optimizer
+    if args.optim == 'sgd':
+        optimizer = SGD(model.parameters(), lr=args.lr, momentum=0.9)
+    elif args.optim == 'adam':
+        optimizer = Adam(model.parameters(), lr=args.lr)
+        
+    # LR Scheduler
+    if args.lr_schedule == 'fixed':
+        scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1)  # no-op scheduler
+    elif args.lr_schedule == 'cycle':
+        scheduler = CyclicLR(optimizer, base_lr=(args.lr / 100), max_lr=args.lr)
 
     start_epoch = 0
     # resume from checkpoint?
@@ -182,12 +195,13 @@ def main(args):
             
             model.load_state_dict(ckpt['model'])
             optimizer.load_state_dict(ckpt['optimizer'])
+            scheduler.load_state_dict(ckpt['scheduler'])
 
     # Train loop
     progress = trange(start_epoch + 1, args.epochs + 1, initial=start_epoch, total=args.epochs, disable=args.no_progress)
     for epoch in progress:
         progress.set_description('TRAIN')
-        train_metrics = train(train_features, pivots, model, optimizer, args)
+        train_metrics = train(train_features, pivots, model, optimizer, scheduler, args)
 
         progress.set_description('EVAL')
         eval_metrics = evaluate(val_features, pivots, model, args)
@@ -198,7 +212,8 @@ def main(args):
         torch.save({
             'metrics': metrics,
             'model': model.state_dict(),
-            'optimizer': optimizer.state_dict()
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict()
         }, ckpt)
 
         if is_new_best(exp.log, metrics):
@@ -237,12 +252,14 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--dropout', type=float, default=0.0, help='Dropout probability for hidden layers')
     
     # Optimization params
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('-b', '--batch-size', type=int, default=50, help='Batch size')
     parser.add_argument('-e', '--epochs', type=int, default=500, help='Number of training epochs')
     parser.add_argument('-i', '--iterations', type=int, default=20, help='Number of iterations (optimizer steps) per epoch')
     parser.add_argument('-v', '--val-iterations', type=int, default=20, help='Number of iterations (each of size defined by -a) for validation')
     parser.add_argument('-a', '--accumulate', type=int, default=1000, help='How many samples to accumulate before optimizer step (must be a multiple of batch size)')
+    parser.add_argument('--lr', type=float, default=0.1, help='Learning rate')
+    parser.add_argument('--lr-schedule', choices=('fixed', 'cycle'), default='cycle', help='LR scheduling')
+    parser.add_argument('--optim', choices=('sgd', 'adam'), default='sgd', help='Optimizer to use')
 
     # Other
     parser.add_argument('-r', '--rundir', type=str, default='runs/', help='Base dir for runs')
@@ -250,7 +267,7 @@ if __name__ == '__main__':
     parser.add_argument('--no-cuda', action='store_false', dest='cuda', help='Run without CUDA')
     parser.add_argument('--no-progress', action='store_true', help='Disable progress bar')
 
-    parser.set_defaults(cuda=True, no_progress=True, resume=False)
+    parser.set_defaults(cuda=True, no_progress=False, resume=False)
     args = parser.parse_args()
 
     np.random.seed(args.seed)
