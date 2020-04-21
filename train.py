@@ -70,30 +70,27 @@ def train(features, pivots, model, optimizer, args):
     steps = steps_for_update * args.iterations
     progress = trange(steps)
     for it in progress:
-        o1, o2, d = prepare(features, pivots, args)
+        o1, o2, d = prepare(features, pivots, args)  # already moved to device        
         
-        real.append(d)
-        
-        o1, o2, d = o1.to(args.device), o2.to(args.device), d.to(args.device)
         emb1, emb2 = model(o1), model(o2)
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
-        
-        estimates.append(dd.detach().cpu())
 
         mse = F.mse_loss(dd, d)
         mape = ((dd - d) / (d + 1e-8)).abs().mean()
-
+        
         progress.set_postfix({
             'mse': f'{mse.item():3.2f}',
-            # 'mape': mape.data.cpu()[0]
+            'mape': f'{mape.item():3.2f}'
         })
 
-        loss = mse
-        loss.backward()
+        mse.backward()
 
         if (it + 1) % steps_for_update:
             optimizer.step()
             optimizer.zero_grad()
+                
+        real.append(d.cpu())
+        estimates.append(dd.detach().cpu())
     
     real = torch.cat(real, 0).squeeze()
     estimates = torch.cat(estimates, 0).squeeze()
@@ -111,13 +108,12 @@ def evaluate(features, pivots, model, args):
     steps = (args.accumulate // args.batch_size) * args.val_iterations
     for _ in trange(steps):
         o1, o2, d = prepare(features, pivots, args)
-        real.append(d)
         
-        o1, o2, d = o1.to(args.device), o2.to(args.device), d.to(args.device)
         emb1, emb2 = model(o1), model(o2)
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
         
-        estimates.append(dd.detach().cpu())
+        real.append(d.cpu())
+        estimates.append(dd.cpu())
     
     real = torch.cat(real, 0).squeeze()
     estimates = torch.cat(estimates, 0).squeeze()
@@ -177,7 +173,7 @@ def main(args):
     # resume from checkpoint?
     if args.resume:
         ckpt = exp.ckpt('last.pth')
-        assert os.path.exist(ckpt), "No checkpoint to resume from!"
+        assert os.path.exists(ckpt), "No checkpoint to resume from!"
         print('Resuming:', ckpt)
         
         ckpt = torch.load(ckpt)
