@@ -53,7 +53,7 @@ class ResMLP(nn.Module):
     
     def forward(self, x):
         for block in self.blocks:
-            x += block(x)
+            x = x + block(x)
         x = self.dropout(x)
         x = self.last(x)
         return x
