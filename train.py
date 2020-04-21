@@ -68,7 +68,7 @@ def train(features, pivots, model, optimizer, args):
     
     steps_for_update = (args.accumulate // args.batch_size)
     steps = steps_for_update * args.iterations
-    progress = trange(steps)
+    progress = trange(steps, disable=args.no_progress)
     for it in progress:
         o1, o2, d = prepare(features, pivots, args)  # already moved to device        
         
@@ -106,7 +106,7 @@ def evaluate(features, pivots, model, args):
     estimates = []
 
     steps = (args.accumulate // args.batch_size) * args.val_iterations
-    for _ in trange(steps):
+    for _ in trange(steps, disable=args.no_progress):
         o1, o2, d = prepare(features, pivots, args)
         
         emb1, emb2 = model(o1), model(o2)
@@ -150,7 +150,7 @@ def compute_metrics(real, estimates, prefix=''):
 
 def main(args):
 
-    exp = expman.Experiment(args, root=args.rundir, ignore=('cuda', 'device', 'epochs', 'resume', 'rundir'))
+    exp = expman.Experiment(args, root=args.rundir, ignore=('cuda', 'device', 'epochs', 'no_progress', 'resume', 'rundir'))
     ckpt_dir = exp.path_to('ckpt')
     os.makedirs(ckpt_dir, exist_ok=True)
 
@@ -184,7 +184,7 @@ def main(args):
             optimizer.load_state_dict(ckpt['optimizer'])
 
     # Train loop
-    progress = trange(start_epoch + 1, args.epochs + 1, initial=start_epoch, total=args.epochs)
+    progress = trange(start_epoch + 1, args.epochs + 1, initial=start_epoch, total=args.epochs, disable=args.no_progress)
     for epoch in progress:
         progress.set_description('TRAIN')
         train_metrics = train(train_features, pivots, model, optimizer, args)
@@ -248,9 +248,9 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--rundir', type=str, default='runs/', help='Base dir for runs')
     parser.add_argument('--resume', action='store_true', dest='resume', help='Resume training')
     parser.add_argument('--no-cuda', action='store_false', dest='cuda', help='Run without CUDA')
+    parser.add_argument('--no-progress', action='store_true', help='Disable progress bar')
 
-    parser.set_defaults(cuda=True)
-    parser.set_defaults(resume=False)
+    parser.set_defaults(cuda=True, no_progress=True, resume=False)
     args = parser.parse_args()
 
     np.random.seed(args.seed)
