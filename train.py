@@ -173,13 +173,15 @@ def main(args):
     # resume from checkpoint?
     if args.resume:
         ckpt = exp.ckpt('last.pth')
-        assert os.path.exists(ckpt), "No checkpoint to resume from!"
-        print('Resuming:', ckpt)
-        
-        ckpt = torch.load(ckpt)
-        start_epoch = ckpt['metrics']['epoch']
-        model.load_state_dict(ckpt['model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
+        if not os.path.exists(ckpt):
+            print("No checkpoint to resume from: starting from scratch...")
+        else:
+            ckpt = torch.load(ckpt)
+            start_epoch = ckpt['metrics']['epoch']
+            print('Resuming from epoch:', start_epoch)
+            
+            model.load_state_dict(ckpt['model'])
+            optimizer.load_state_dict(ckpt['optimizer'])
 
     # Train loop
     progress = trange(start_epoch + 1, args.epochs + 1, initial=start_epoch, total=args.epochs)
@@ -223,7 +225,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train Distance Estimation from Pivot Distances',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     # Data params
-    parser.add_argument('data', choices=('yfcc100m-hybridfc6'), help='dataset for training')
+    parser.add_argument('data', choices=('yfcc100m-hybridfc6',), help='dataset for training')
     parser.add_argument('-s', '--seed', type=int, default=23, help='Random initial seed')
     parser.add_argument('-p', '--pivot-seed', type=int, default=0, help='controls random selection of pivots')
     
