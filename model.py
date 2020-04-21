@@ -45,7 +45,7 @@ class MLP(nn.Module):
 class ResMLP(nn.Module):
 
     def __init__(self, params):
-        super(MLP, self).__init__()
+        super(ResMLP, self).__init__()
     
         self.blocks = nn.ModuleList([self._res_block(params.dim) for _ in range(params.depth)])    
         self.dropout = nn.Dropout(params.dropout)
