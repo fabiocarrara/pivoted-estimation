@@ -249,14 +249,14 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--dim', type=int, default=200, help='Final dimensionality (also number of pivots)')
     parser.add_argument('-l', '--depth', type=int, default=2, help='Number of hidden layers (for MLP) or residual blocks (for ResMLP)')
     parser.add_argument('-n', '--batch-norm', action='store_true', default=False, help='Whether to use BN in MLP model')
-    parser.add_argument('-o', '--dropout', type=float, default=0.0, help='Dropout probability for hidden layers')
+    parser.add_argument('-o', '--dropout', type=float, default=0.5, help='Dropout probability for hidden layers')
     
     # Optimization params
     parser.add_argument('-b', '--batch-size', type=int, default=50, help='Batch size')
     parser.add_argument('-e', '--epochs', type=int, default=500, help='Number of training epochs')
-    parser.add_argument('-i', '--iterations', type=int, default=20, help='Number of iterations (optimizer steps) per epoch')
+    parser.add_argument('-i', '--iterations', type=int, default=100, help='Number of iterations (optimizer steps) per epoch')
     parser.add_argument('-v', '--val-iterations', type=int, default=20, help='Number of iterations (each of size defined by -a) for validation')
-    parser.add_argument('-a', '--accumulate', type=int, default=1000, help='How many samples to accumulate before optimizer step (must be a multiple of batch size)')
+    parser.add_argument('-a', '--accumulate', type=int, default=100, help='How many samples to accumulate before optimizer step (must be a multiple of batch size)')
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate')
     parser.add_argument('--lr-schedule', choices=('fixed', 'cycle'), default='cycle', help='LR scheduling')
     parser.add_argument('--optim', choices=('sgd', 'adam'), default='sgd', help='Optimizer to use')
