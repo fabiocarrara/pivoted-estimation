@@ -1,20 +1,27 @@
 import argparse
+import expman
 import h5py
-import torch
 import numpy as np
 import pandas as pd
 import os
-import glob2
-import re
+import shutil
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch.autograd import Variable as V
 from torch.optim import Adam
 from tqdm import trange
 
+from model import get_model
 
+# paths to HDF5 file containing features
+DATA_PATHS = {
+    'yfcc100m-hybridfc6': 'data/yfcc100m-hybridfc6/features-001-of-100.h5'
+}
+
+
+@torch.no_grad()
 def prepare(features, pivots, args):
 
     features, start, end = features
@@ -56,37 +63,45 @@ def train(features, pivots, model, optimizer, args):
     model.train()
     optimizer.zero_grad()
 
-    train_metrics = []
+    real = []
+    estimates = []
     
     steps_for_update = (args.accumulate // args.batch_size)
     steps = steps_for_update * args.iterations
     progress = trange(steps)
     for it in progress:
         o1, o2, d = prepare(features, pivots, args)
-
+        
+        real.append(d)
+        
+        o1, o2, d = o1.to(args.device), o2.to(args.device), d.to(args.device)
         emb1, emb2 = model(o1), model(o2)
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
+        
+        estimates.append(dd.detach().cpu())
 
         mse = F.mse_loss(dd, d)
-        # mape = ((dd - d) / (d + 1e-8)).abs().mean()
+        mape = ((dd - d) / (d + 1e-8)).abs().mean()
 
-        metrics = {
-            'mse': '{:3.2f}'.format(mse.data.cpu()[0]),
+        progress.set_postfix({
+            'mse': f'{mse.item():3.2f}',
             # 'mape': mape.data.cpu()[0]
-        }
-        progress.set_postfix(metrics)
+        })
 
         loss = mse
         loss.backward()
 
         if (it + 1) % steps_for_update:
             optimizer.step()
-            train_metrics.append(metrics)
             optimizer.zero_grad()
+    
+    real = torch.cat(real, 0).squeeze()
+    estimates = torch.cat(estimates, 0).squeeze()
 
-    return train_metrics
+    return compute_metrics(real, estimates, prefix='train_')
 
 
+@torch.no_grad()
 def evaluate(features, pivots, model, args):
     model.eval()
 
@@ -96,21 +111,22 @@ def evaluate(features, pivots, model, args):
     steps = (args.accumulate // args.batch_size) * args.val_iterations
     for _ in trange(steps):
         o1, o2, d = prepare(features, pivots, args)
-        o1, o2, d = o1.to(args.device), o2.to(args.device), d.to(args.device)
-        
         real.append(d)
-
+        
+        o1, o2, d = o1.to(args.device), o2.to(args.device), d.to(args.device)
         emb1, emb2 = model(o1), model(o2)
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
         
-        estimates.append(dd.data)
+        estimates.append(dd.detach().cpu())
     
     real = torch.cat(real, 0).squeeze()
     estimates = torch.cat(estimates, 0).squeeze()
-
-    if args.metrics:
-        print('Couples evaluated:', real.shape[0])
     
+    return compute_metrics(real, estimates)
+
+
+@torch.no_grad()
+def compute_metrics(real, estimates, prefix=''):
     errors = estimates - real
     
     abs_errors = errors.abs()
@@ -120,49 +136,29 @@ def evaluate(features, pivots, model, args):
     div = real / estimates
 
     return {
-        'mse': sq_errors.mean(),
-        'mse_std': sq_errors.std(),
+        prefix + 'mse': sq_errors.mean().item(),
+        prefix + 'mse_std': sq_errors.std().item(),
         
-        'mape': rel_errors.mean(),
-        'mape_std': rel_errors.std(),
+        prefix + 'mape': rel_errors.mean().item(),
+        prefix + 'mape_std': rel_errors.std().item(),
         
-        'mae': abs_errors.mean(),
-        'mae_std': abs_errors.std(),
+        prefix + 'mae': abs_errors.mean().item(),
+        prefix + 'mae_std': abs_errors.std().item(),
 
-        'dist': div.max() / div.min(),
-        'mdist': (div / div.min()).mean(),
-        'mdist_std': (div / div.min()).std()
+        prefix + 'dist': (div.max() / div.min()).item(),
+        prefix + 'mdist': (div / div.min()).mean().item(),
+        prefix + 'mdist_std': (div / div.min()).std().item()
     }
-    
+
+ 
 
 def main(args):
 
-    # Prepare run dir
-    params = vars(args)
-    run_name = 'siamese_' \
-               'a{0[accumulate]}_' \
-               'b{0[batch_size]}_' \
-               'd{0[dimensionality]}_' \
-               'l{0[layers]}_' \
-               'do{0[dropout]}_' \
-               'lr{0[lr]}_' \
-               'i{0[iterations]}_' \
-               'p{0[pivot_seed]}_' \
-               's[0[seed]'.format(params)
+    exp = expman.Experiment(args, root=args.rundir, ignore=('cuda', 'device', 'epochs', 'resume', 'rundir'))
+    ckpt_dir = exp.path_to('ckpt')
+    os.makedirs(ckpt_dir, exist_ok=True)
 
-    run_dir = os.path.join(args.runs, run_name)
-    ckpt_dir = os.path.join(run_dir, 'ckpt')
-    if not os.path.exists(run_dir):
-        os.makedirs(run_dir)
-        os.makedirs(ckpt_dir)
-
-    log_file = os.path.join(run_dir, 'log.csv')
-    train_log_file = os.path.join(run_dir, 'train_log.csv')
-
-    param_file = os.path.join(run_dir, 'params.csv')
-    pd.DataFrame(params, index=[0]).to_csv(param_file, index=False)
-
-    features = h5py.File(args.features)['data']
+    features = h5py.File(DATA_PATHS[args.data], 'r')['data']
     
     # a subset is (set, start, end)
     train_features = (features, 0, 750 * (10 ** 3))
@@ -170,116 +166,93 @@ def main(args):
     # test_features = (features, 850 * (10 ** 3), 950 * (10 ** 3))
 
     pivots_start = 950 * (10 ** 3) + (4096 * args.pivot_seed)
-    pivots = features[pivots_start:pivots_start + args.dimensionality, :]
-    pivots = torch.from_numpy(pivots).cuda()
+    pivots = features[pivots_start:pivots_start + args.dim, :]
+    pivots = torch.from_numpy(pivots).to(args.device)
 
     # Build the model
-    layers = []
-    
-    for i in range(args.layers - 1):
-        layers.extend([
-            nn.Linear(args.dimensionality, args.dimensionality),
-            nn.ReLU()
-        ])
-
-    if args.dropout:
-        layers.append(nn.Dropout(args.dropout))
-
-    layers.append(nn.Linear(args.dimensionality, args.dimensionality))
-        
-    model = nn.Sequential(*layers).to(args.device)
+    model = get_model(args).to(args.device)
     optimizer = Adam(model.parameters(), lr=args.lr)
 
-    # Train loop
-    log = pd.DataFrame()
-    train_log = pd.DataFrame()
-
-    watch_metrics = ['mae', 'mape', 'mse']
-    best = pd.DataFrame({k: np.inf for k in watch_metrics}, index=[0])
     start_epoch = 0
-
-    # resume from checkpoint
+    # resume from checkpoint?
     if args.resume:
-        ckpts = glob2.glob(os.path.join(ckpt_dir, '*.pth'))
-
-        assert ckpts, "No checkpoints to resume from!"
-
-        def get_epoch(ckpt_url):
-            s = re.findall("ckpt_e(\d+).pth", ckpt_url)
-            epoch = int(s[0]) if s else -1
-            return epoch, ckpt_url
-
-        start_epoch, ckpt = max(get_epoch(c) for c in ckpts)
-
+        ckpt = exp.ckpt('last.pth')
+        assert os.path.exist(ckpt), "No checkpoint to resume from!"
         print('Resuming:', ckpt)
-
+        
         ckpt = torch.load(ckpt)
+        start_epoch = ckpt['metrics']['epoch']
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
 
-        # compute metrics, print them, and exit
-        if args.metrics:
-            metrics = evaluate(val_features, pivots, model, args)
-            metrics = pd.DataFrame(metrics, index=[0])
-            print(metrics)
-            return
-
-        best = ckpt['metrics'][watch_metrics].sort_index(axis=1)
-
-        log = pd.read_csv(log_file)
-        train_log = pd.read_csv(train_log_file)
-
+    # Train loop
     progress = trange(start_epoch + 1, args.epochs + 1, initial=start_epoch, total=args.epochs)
     for epoch in progress:
         progress.set_description('TRAIN')
-        metrics = train(train_features, pivots, model, optimizer, args)
-        metrics = pd.DataFrame.from_records(metrics)
-        metrics['epoch'] = epoch
-        train_log = train_log.append(metrics, ignore_index=True)
-        train_log.to_csv(train_log_file, index=False)
+        train_metrics = train(train_features, pivots, model, optimizer, args)
 
         progress.set_description('EVAL')
-        metrics = evaluate(val_features, pivots, model, args)
-        metrics['epoch'] = epoch
-        log = log.append(metrics, ignore_index=True)
-        log.to_csv(log_file, index=False)
+        eval_metrics = evaluate(val_features, pivots, model, args)
+        
+        metrics = {'epoch': epoch, **train_metrics, **eval_metrics}        
 
-        metrics = pd.DataFrame(metrics, index=[0]).sort_index(axis=1)
-        current = metrics[watch_metrics].sort_index(axis=1)
-        if (current < best).any(axis=1)[0]:
-            best = current.where(current < best, best).sort_index(axis=1)
-            ckpt = os.path.join(ckpt_dir, 'ckpt_e{}.pth'.format(epoch))
-            torch.save({
-                'metrics': metrics,
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict()
-            }, ckpt)
+        ckpt = exp.ckpt('last.pth')
+        torch.save({
+            'metrics': metrics,
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict()
+        }, ckpt)
+
+        if is_new_best(exp.log, metrics):
+            best_ckpt = exp.ckpt(f'ckpt_e{epoch}.pth')
+            shutil.copyfile(ckpt, best_ckpt)
+            
+        exp.push_log(metrics)        
+
+
+def is_new_best(log, metrics):
+    if log.empty:
+        return True
+    
+    # any improvement on any of these metrics will trigger model snapshotting
+    watch_metrics = ['mae', 'mape', 'mse']
+    
+    best = log[watch_metrics].min()
+    current = pd.Series(metrics)[watch_metrics]
+    return (current < best).any()
+    
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train Distance Estimation from Pivot Distances',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('features', help='HDF5 file containing features')
+    # Data params
+    parser.add_argument('data', choices=('yfcc100m-hybridfc6'), help='dataset for training')
+    parser.add_argument('-s', '--seed', type=int, default=23, help='Random initial seed')
     parser.add_argument('-p', '--pivot-seed', type=int, default=0, help='controls random selection of pivots')
+    
+    # Model params
+    parser.add_argument('model', choices=('mlp', 'res-mlp'), help='dataset for training')
+    parser.add_argument('-d', '--dim', type=int, default=200, help='Final dimensionality (also number of pivots)')
+    parser.add_argument('-l', '--depth', type=int, default=2, help='Number of hidden layers (for MLP) or residual blocks (for ResMLP)')
+    parser.add_argument('-n', '--batch-norm', action='store_true', default=False, help='Whether to use BN in MLP model')
+    parser.add_argument('-o', '--dropout', type=float, default=0.0, help='Dropout probability for hidden layers')
+    
+    # Optimization params
+    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('-b', '--batch-size', type=int, default=50, help='Batch size')
     parser.add_argument('-e', '--epochs', type=int, default=500, help='Number of training epochs')
     parser.add_argument('-i', '--iterations', type=int, default=20, help='Number of iterations (optimizer steps) per epoch')
     parser.add_argument('-v', '--val-iterations', type=int, default=20, help='Number of iterations (each of size defined by -a) for validation')
-    parser.add_argument('-b', '--batch-size', type=int, default=50, help='Batch size')
     parser.add_argument('-a', '--accumulate', type=int, default=1000, help='How many samples to accumulate before optimizer step (must be a multiple of batch size)')
-    parser.add_argument('-d', '--dimensionality', type=int, default=200, help='Final dimensionality (also number of pivots)')
-    parser.add_argument('-l', '--layers', type=int, default=2, help='Number of hidden layers')
-    parser.add_argument('-o', '--dropout', type=float, default=0.0, help='Dropout probability for hidden layers')
-    parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
-    parser.add_argument('-s', '--seed', type=int, default=23, help='Random initial seed')
 
-    parser.add_argument('-r', '--runs', type=str, default='runs/', help='Base dir for runs')
+    # Other
+    parser.add_argument('-r', '--rundir', type=str, default='runs/', help='Base dir for runs')
     parser.add_argument('--resume', action='store_true', dest='resume', help='Resume training')
-    parser.add_argument('--metrics', action='store_true', dest='metrics', help='Compute metrics and exit (to be used with --resume)')
-    parser.add_argument('--no-cuda', action='store_true', help='Run without CUDA')
+    parser.add_argument('--no-cuda', action='store_false', dest='cuda', help='Run without CUDA')
 
+    parser.set_defaults(cuda=True)
     parser.set_defaults(resume=False)
-    parser.set_defaults(metrics=False)
-    parser.set_defaults(no_cuda=False)
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -287,7 +260,7 @@ if __name__ == '__main__':
     torch.cuda.manual_seed(args.seed)
 
     args.device = torch.device('cpu')
-    if not args.no_cuda and torch.cuda.is_available():
+    if args.cuda and torch.cuda.is_available():
         args.device = torch.device('cuda')
 
     main(args)
