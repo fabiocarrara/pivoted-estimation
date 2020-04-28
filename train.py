@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torch.optim import SGD, Adam
-from torch.optim.lr_scheduler import LambdaLR, CyclicLR
+from torch.optim.lr_scheduler import LambdaLR, CyclicLR, ReduceLROnPlateau
 from tqdm import trange
 
 from model import get_model
@@ -71,7 +71,7 @@ def train(features, pivots, model, optimizer, scheduler, args):
     steps = steps_for_update * args.iterations
     progress = trange(steps, disable=args.no_progress)
     for it in progress:
-        o1, o2, d = prepare(features, pivots, args)  # already moved to device        
+        o1, o2, d = prepare(features, pivots, args)  # already moved to device
         
         emb1, emb2 = model(o1), model(o2)
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
@@ -89,10 +89,11 @@ def train(features, pivots, model, optimizer, scheduler, args):
         if (it + 1) % steps_for_update:
             optimizer.step()
             optimizer.zero_grad()
-            scheduler.step()
-                
-        real.append(d.cpu())
-        estimates.append(dd.detach().cpu())
+            if args.lr_schedule == 'cycle':
+                scheduler.step()
+
+        real.append(d)
+        estimates.append(dd.detach())
     
     real = torch.cat(real, 0).squeeze()
     estimates = torch.cat(estimates, 0).squeeze()
@@ -114,8 +115,8 @@ def evaluate(features, pivots, model, args):
         emb1, emb2 = model(o1), model(o2)
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
         
-        real.append(d.cpu())
-        estimates.append(dd.cpu())
+        real.append(d)
+        estimates.append(dd)
     
     real = torch.cat(real, 0).squeeze()
     estimates = torch.cat(estimates, 0).squeeze()
@@ -153,6 +154,8 @@ def compute_metrics(real, estimates, prefix=''):
 def main(args):
 
     exp = expman.Experiment(args, root=args.rundir, ignore=('cuda', 'device', 'epochs', 'no_progress', 'resume', 'rundir'))
+    print(exp)
+
     ckpt_dir = exp.path_to('ckpt')
     os.makedirs(ckpt_dir, exist_ok=True)
 
@@ -181,6 +184,8 @@ def main(args):
         scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1)  # no-op scheduler
     elif args.lr_schedule == 'cycle':
         scheduler = CyclicLR(optimizer, base_lr=(args.lr / 100), max_lr=args.lr)
+    elif args.lr_schedule == 'plateau':
+        scheduler = ReduceLROnPlateau(optimizer)
 
     start_epoch = 0
     # resume from checkpoint?
@@ -220,7 +225,10 @@ def main(args):
             best_ckpt = exp.ckpt(f'ckpt_e{epoch}.pth')
             shutil.copyfile(ckpt, best_ckpt)
             
-        exp.push_log(metrics)        
+        exp.push_log(metrics)
+
+        if args.lr_schedule == 'plateau':
+            scheduler.step(metrics['mse'])
 
 
 def is_new_best(log, metrics):
@@ -258,7 +266,7 @@ if __name__ == '__main__':
     parser.add_argument('-v', '--val-iterations', type=int, default=20, help='Number of iterations (each of size defined by -a) for validation')
     parser.add_argument('-a', '--accumulate', type=int, default=100, help='How many samples to accumulate before optimizer step (must be a multiple of batch size)')
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate')
-    parser.add_argument('--lr-schedule', choices=('fixed', 'cycle'), default='cycle', help='LR scheduling')
+    parser.add_argument('--lr-schedule', choices=('fixed', 'cycle', 'plateau'), default='cycle', help='LR scheduling')
     parser.add_argument('--optim', choices=('sgd', 'adam'), default='sgd', help='Optimizer to use')
 
     # Other
