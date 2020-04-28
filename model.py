@@ -47,9 +47,10 @@ class ResMLP(nn.Module):
     def __init__(self, params):
         super(ResMLP, self).__init__()
     
-        self.blocks = nn.ModuleList([self._res_block(params.dim) for _ in range(params.depth)])    
+        block_fn = self._bn_res_block if params.batch_norm else self._res_block
+        self.blocks = nn.ModuleList([block_fn(params.dim) for _ in range(params.depth)])
         self.dropout = nn.Dropout(params.dropout)
-        self.last = nn.Linear(params.dim, params.dim)    
+        self.last = nn.Linear(params.dim, params.dim)
     
     def forward(self, x):
         for block in self.blocks:
@@ -59,12 +60,20 @@ class ResMLP(nn.Module):
         return x
 
     @staticmethod
-    def _res_block(dim):
+    def _bn_res_block(dim):
         return nn.Sequential(
             nn.Linear(dim, dim),
             nn.BatchNorm1d(dim),
             nn.ReLU(),
             nn.Linear(dim, dim),
             nn.BatchNorm1d(dim)
+        )
+
+    @staticmethod
+    def _res_block(dim):
+        return nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
         )
 
