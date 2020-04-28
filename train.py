@@ -84,7 +84,10 @@ def train(features, pivots, model, optimizer, scheduler, args):
             'mape': f'{mape.item():3.2f}'
         })
 
-        mse.backward()
+        if args.loss == 'mse':
+            mse.backward()
+        elif args.loss == 'mape':
+            mape.backward()
 
         if (it + 1) % steps_for_update:
             optimizer.step()
@@ -149,7 +152,6 @@ def compute_metrics(real, estimates, prefix=''):
         prefix + 'mdist_std': (div / div.min()).std().item()
     }
 
- 
 
 def main(args):
 
@@ -258,6 +260,7 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--depth', type=int, default=2, help='Number of hidden layers (for MLP) or residual blocks (for ResMLP)')
     parser.add_argument('-n', '--batch-norm', action='store_true', default=False, help='Whether to use BN in MLP model')
     parser.add_argument('-o', '--dropout', type=float, default=0.5, help='Dropout probability for hidden layers')
+    parser.add_argument('--loss', choices=('mse', 'mape'), default='mse', help='The metric to optimize')
     
     # Optimization params
     parser.add_argument('-b', '--batch-size', type=int, default=50, help='Batch size')
