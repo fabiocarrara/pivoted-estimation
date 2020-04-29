@@ -187,7 +187,7 @@ def main(args):
     elif args.lr_schedule == 'cycle':
         scheduler = CyclicLR(optimizer, base_lr=(args.lr / 100), max_lr=args.lr)
     elif args.lr_schedule == 'plateau':
-        scheduler = ReduceLROnPlateau(optimizer)
+        scheduler = ReduceLROnPlateau(optimizer, patience=args.patience)
 
     start_epoch = 0
     # resume from checkpoint?
@@ -213,7 +213,7 @@ def main(args):
         progress.set_description('EVAL')
         eval_metrics = evaluate(val_features, pivots, model, args)
         
-        metrics = {'epoch': epoch, **train_metrics, **eval_metrics}        
+        metrics = {'epoch': epoch, **train_metrics, **eval_metrics}
 
         ckpt = exp.ckpt('last.pth')
         torch.save({
@@ -263,6 +263,7 @@ if __name__ == '__main__':
     parser.add_argument('--loss', choices=('mse', 'mape'), default='mse', help='The metric to optimize')
     
     # Optimization params
+    parser.add_argument('--optim', choices=('sgd', 'adam'), default='sgd', help='Optimizer to use')
     parser.add_argument('-b', '--batch-size', type=int, default=50, help='Batch size')
     parser.add_argument('-e', '--epochs', type=int, default=500, help='Number of training epochs')
     parser.add_argument('-i', '--iterations', type=int, default=100, help='Number of iterations (optimizer steps) per epoch')
@@ -270,7 +271,7 @@ if __name__ == '__main__':
     parser.add_argument('-a', '--accumulate', type=int, default=100, help='How many samples to accumulate before optimizer step (must be a multiple of batch size)')
     parser.add_argument('--lr', type=float, default=0.1, help='Learning rate')
     parser.add_argument('--lr-schedule', choices=('fixed', 'cycle', 'plateau'), default='cycle', help='LR scheduling')
-    parser.add_argument('--optim', choices=('sgd', 'adam'), default='sgd', help='Optimizer to use')
+    parser.add_argument('--patience', type=int, default=10, help='Patience in epoch for "plateau" schedule')
 
     # Other
     parser.add_argument('-r', '--rundir', type=str, default='runs/', help='Base dir for runs')
