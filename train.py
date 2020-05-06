@@ -77,17 +77,25 @@ def train(features, pivots, model, optimizer, scheduler, args):
         dd = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True)
 
         mse = F.mse_loss(dd, d)
+        mae = F.l1_loss(dd, d)
         mape = ((dd - d) / (d + 1e-8)).abs().mean()
+        sml1 = F.smooth_l1_loss(dd, d)
         
         progress.set_postfix({
             'mse': f'{mse.item():3.2f}',
-            'mape': f'{mape.item():3.2f}'
+            'mae': f'{mae.item():3.2f}',
+            'mape': f'{mape.item():3.2f}',
+            'sml1': f'{sml1.item():3.2f}'
         })
 
         if args.loss == 'mse':
             mse.backward()
+        elif args.loss == 'mae':
+            mae.backward()
         elif args.loss == 'mape':
             mape.backward()
+        elif args.loss == 'sml1':
+            sml1.backward()
 
         if (it + 1) % steps_for_update:
             optimizer.step()
@@ -134,6 +142,7 @@ def compute_metrics(real, estimates, prefix=''):
     abs_errors = errors.abs()
     rel_errors = (errors / (real + 1e-8)).abs()
     sq_errors = torch.pow(errors, 2)
+    sm_abs_errors = F.smooth_l1_loss(estimates, real, reduction='none')
 
     div = real / estimates
 
@@ -146,6 +155,9 @@ def compute_metrics(real, estimates, prefix=''):
         
         prefix + 'mae': abs_errors.mean().item(),
         prefix + 'mae_std': abs_errors.std().item(),
+
+        prefix + 'sml1': sm_abs_errors.mean().item(),
+        prefix + 'sml1_std': sm_abs_errors.std().item(),
 
         prefix + 'dist': (div.max() / div.min()).item(),
         prefix + 'mdist': (div / div.min()).mean().item(),
@@ -180,12 +192,12 @@ def main(args):
         optimizer = SGD(model.parameters(), lr=args.lr, momentum=0.9)
     elif args.optim == 'adam':
         optimizer = Adam(model.parameters(), lr=args.lr)
-        
+    
     # LR Scheduler
     if args.lr_schedule == 'fixed':
         scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1)  # no-op scheduler
     elif args.lr_schedule == 'cycle':
-        scheduler = CyclicLR(optimizer, base_lr=(args.lr / 100), max_lr=args.lr)
+        scheduler = CyclicLR(optimizer, base_lr=(args.lr / 100), max_lr=args.lr, mode='triangular2')
     elif args.lr_schedule == 'plateau':
         scheduler = ReduceLROnPlateau(optimizer, patience=args.patience)
 
@@ -238,7 +250,7 @@ def is_new_best(log, metrics):
         return True
     
     # any improvement on any of these metrics will trigger model snapshotting
-    watch_metrics = ['mae', 'mape', 'mse']
+    watch_metrics = ['mae', 'mape', 'mse', 'sml1']
     
     best = log[watch_metrics].min()
     current = pd.Series(metrics)[watch_metrics]
@@ -260,7 +272,7 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--depth', type=int, default=2, help='Number of hidden layers (for MLP) or residual blocks (for ResMLP)')
     parser.add_argument('-n', '--batch-norm', action='store_true', default=False, help='Whether to use BN in MLP model')
     parser.add_argument('-o', '--dropout', type=float, default=0.5, help='Dropout probability for hidden layers')
-    parser.add_argument('--loss', choices=('mse', 'mape'), default='mse', help='The metric to optimize')
+    parser.add_argument('--loss', choices=('mse', 'mape', 'mae', 'sml1'), default='mse', help='The metric to optimize')
     
     # Optimization params
     parser.add_argument('--optim', choices=('sgd', 'adam'), default='sgd', help='Optimizer to use')
