@@ -21,7 +21,6 @@ DATA_PATHS = {
     'yfcc100m-hybridfc6': 'data/yfcc100m-hybridfc6/features-001-of-100.h5'
 }
 
-
 @torch.no_grad()
 def prepare(features, args):
 
@@ -33,14 +32,21 @@ def prepare(features, args):
     d = features.shape[1]  # dimensionality of original features
 
     # takes n features as pivots and two batches of features as data points
-    x = np.random.choice(n_features, n + 2*b, replace=False) + start
-    
-    # sort indexes for h5py, keep also inverse sorting to return to random order
-    s = np.argsort(x)
-    invs = np.argsort(s)
+    n_take = n + 2*b
+    if False:  # random access to hdf5 is slow
+        x = np.random.choice(n_features, n_take, replace=False) + start
+        
+        # sort indexes for h5py, keep also inverse sorting to return to random order
+        s = np.argsort(x)
+        invs = np.argsort(s)
 
-    # get the features
-    x = torch.from_numpy(features[x[s], ...][invs]).to(args.device)
+        # get the features
+        x = features[x[s], ...][invs]
+    else:
+        x = np.random.randint(n_features - n_take)
+        x = np.random.shuffle(features[x:x + n_take, ...])
+        
+    x = torch.from_numpy(x).to(args.device)
     o1, o2, pivots = x.split((b, b, n))
 
     # object-object euclidean distances (target)
