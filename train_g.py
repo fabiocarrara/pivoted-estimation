@@ -44,7 +44,8 @@ def prepare(features, args):
         x = features[x[s], ...][invs]
     else:
         x = np.random.randint(n_features - n_take)
-        x = np.random.shuffle(features[x:x + n_take, ...])
+        x = features[x:x + n_take, ...]
+        np.random.shuffle(x)
         
     x = torch.from_numpy(x).to(args.device)
     o1, o2, pivots = x.split((b, b, n))
