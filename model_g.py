@@ -4,11 +4,15 @@ import torch.nn.functional as F
 
 
 def get_model(params):
+    return get_model_from_dict(params.to_dict())
 
-    if params.model == 'mlp':
+def get_model_from_dict(params):
+    model_type = params.get('model', 'res-mlp')
+    
+    if model_type == 'mlp':
         return MLP(params)
         
-    elif params.model == 'res-mlp':
+    elif model_type == 'res-mlp':
         return ResMLP(params)
         
 
@@ -17,17 +21,19 @@ class MLP(nn.Module):
     def __init__(self, params):
         super(MLP, self).__init__()
     
-        stage_fn = self._bn_stage if params.batch_norm else self._linear_stage
+        stage_fn = self._bn_stage if params.get('batch_norm', True) else self._linear_stage
         
-        if params.fusion == 'early':
-            pre, post = 0, params.depth
-        elif params.fusion == 'mid':
-            pre = params.depth // 2
-            post = params.depth - pre
-        elif params.fusion == 'late':
-            pre, post = params.depth, 0
+        fusion_strategy = params.get('fusion', 'early')
+        depth = params.get('depth', 1)
+        if fusion_strategy == 'early':
+            pre, post = 0, depth
+        elif fusion_strategy == 'mid':
+            pre = depth // 2
+            post = depth - pre
+        elif fusion_strategy == 'late':
+            pre, post = depth, 0
         
-        op_dim = params.dim
+        op_dim = params.get('dim', 64)
         pp_dim = op_dim * (op_dim - 1) // 2
         post_dim = op_dim + pp_dim
             
@@ -35,7 +41,7 @@ class MLP(nn.Module):
         self.pre_stages_pp = nn.ModuleList([stage_fn(pp_dim) for _ in range(pre)])
         
         self.post_stages = nn.ModuleList([stage_fn(post_dim) for _ in range(post)])
-        self.dropout = nn.Dropout(params.dropout)
+        self.dropout = nn.Dropout(params.get('dropout', 0))
         self.last = nn.Linear(post_dim, op_dim)
     
     def forward(self, op, pp):
@@ -79,17 +85,20 @@ class ResMLP(nn.Module):
     def __init__(self, params):
         super(ResMLP, self).__init__()
     
-        block_fn = self._bn_res_block if params.batch_norm else self._res_block
+        block_fn = self._bn_res_block if params.get('batch_norm', True) else self._res_block
         
-        if params.fusion == 'early':
-            pre, post = 0, params.depth
-        elif params.fusion == 'mid':
-            pre = params.depth // 2
-            post = params.depth - pre
-        elif params.fusion == 'late':
-            pre, post = params.depth, 0
+        fusion_strategy = params.get('fusion', 'early')
+        depth = params.get('depth', 1)
+        if fusion_strategy == 'early':
+            pre, post = 0, depth
+        elif fusion_strategy == 'mid':
+            pre = depth // 2
+            post = depth - pre
+        elif fusion_strategy == 'late':
+            pre, post = depth, 0
         
-        op_dim = params.dim
+        
+        op_dim = params.get('dim', 64)
         pp_dim = op_dim * (op_dim - 1) // 2
         post_dim = op_dim + pp_dim
             
@@ -97,7 +106,7 @@ class ResMLP(nn.Module):
         self.pre_stages_pp = nn.ModuleList([block_fn(pp_dim) for _ in range(pre)])
         
         self.post_stages = nn.ModuleList([block_fn(post_dim) for _ in range(post)])
-        self.dropout = nn.Dropout(params.dropout)
+        self.dropout = nn.Dropout(params.get('dropout', 0))
         self.last = nn.Linear(post_dim, op_dim)
         
     def forward(self, op, pp):
@@ -108,12 +117,12 @@ class ResMLP(nn.Module):
         # pivot-pivot branch
         if pp.dim() < 2:
             pp = pp.unsqueeze(0)
+            pp = pp.expand(op.shape[0], -1)  # expand to batch_size
       
         for stage in self.pre_stages_pp:
             pp = pp + stage(pp)
         
         # combined branch
-        pp = pp.expand(op.shape[0], -1)  # expand to batch_size
         x = torch.cat((op, pp), dim=1)  # fusion (concatenate)
         
         for stage in self.post_stages:
