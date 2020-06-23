@@ -12,16 +12,10 @@ from torch.optim import SGD, Adam
 from torch.optim.lr_scheduler import LambdaLR, CyclicLR, ReduceLROnPlateau
 from tqdm import trange
 
-from hyperopt import hp
-from hyperopt.pyll.base import scope
-
 import ray
 from ray import tune
-from ray.tune.schedulers import ASHAScheduler
-from ray.tune.suggest import ConcurrencyLimiter
-from ray.tune.suggest.hyperopt import HyperOptSearch
 
-from model_g import get_model_from_dict
+from model import get_model_from_dict
 
 # paths to HDF5 file containing features
 DATA_PATHS = {
@@ -54,9 +48,9 @@ def prepare(features, args):
     # object-pivot euclidean distances (input)
     op1 = torch.cdist(o1, pivots, p=2)
     op2 = torch.cdist(o2, pivots, p=2)
-    
+
     # pivot-pivot distances (additional input)
-    pp = torch.pdist(pivots, p=2) 
+    pp = torch.pdist(pivots, p=2)
 
     return op1, op2, pp, oo
 
@@ -68,13 +62,13 @@ def train(data, model, optimizer, scheduler, args):
 
     real = []
     estimates = []
-    
+
     steps_for_update = (args.get('accumulate', 100) // args.get('batch_size',  50))
     steps = steps_for_update * args.get('iterations', 100)
     progress = trange(steps, disable=args.get('no_progress', True))
     for it in progress:
         op1, op2, pp, oo = prepare(data, args)  # already moved to device
-        
+
         emb1, emb2 = model(op1, pp), model(op2, pp)
         oo_p = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True).sqrt()
 
@@ -82,7 +76,7 @@ def train(data, model, optimizer, scheduler, args):
         mae = F.l1_loss(oo_p, oo)
         mape = ((oo_p - oo) / (oo + 1e-8)).abs().mean()
         sml1 = F.smooth_l1_loss(oo_p, oo)
-        
+
         progress.set_postfix({
             'mse': f'{mse.item():3.2f}',
             'mae': f'{mae.item():3.2f}',
@@ -108,7 +102,7 @@ def train(data, model, optimizer, scheduler, args):
 
         real.append(oo)
         estimates.append(oo_p.detach())
-    
+
     real = torch.cat(real, 0).squeeze()
     estimates = torch.cat(estimates, 0).squeeze()
 
@@ -125,23 +119,23 @@ def evaluate(data, model, args):
     steps = (args.get('accumulate', 100) // args.get('batch_size', 50)) * args.get('val_iterations', 20)
     for _ in trange(steps, disable=args.get('no_progress', True)):
         op1, op2, pp, oo = prepare(data, args)
-        
+
         emb1, emb2 = model(op1, pp), model(op2, pp)
         oo_p = torch.pow(emb1 - emb2, 2).sum(1, keepdim=True).sqrt()
 
         real.append(oo)
         estimates.append(oo_p)
-    
+
     real = torch.cat(real, 0).squeeze()
     estimates = torch.cat(estimates, 0).squeeze()
-    
+
     return compute_metrics(real, estimates)
 
 
 @torch.no_grad()
 def compute_metrics(real, estimates, prefix=''):
     errors = estimates - real
-    
+
     abs_errors = errors.abs()
     rel_errors = (errors / (real + 1e-8)).abs()
     sq_errors = torch.pow(errors, 2)
@@ -152,10 +146,10 @@ def compute_metrics(real, estimates, prefix=''):
     return {
         prefix + 'mse': sq_errors.mean().item(),
         prefix + 'mse_std': sq_errors.std().item(),
-        
+
         prefix + 'mape': rel_errors.mean().item(),
         prefix + 'mape_std': rel_errors.std().item(),
-        
+
         prefix + 'mae': abs_errors.mean().item(),
         prefix + 'mae_std': abs_errors.std().item(),
 
@@ -169,13 +163,12 @@ def compute_metrics(real, estimates, prefix=''):
 
 
 def main(args):
-
     features = DATA_PATHS[args.data]
 
     class regressor(tune.Trainable):
         def _setup(self, config):
             self.config = config
-            
+
             device = config.get('device', 'cuda')
             dim = config.get('dim', 64)
             batch_size = config.get('batch_size', 50)
@@ -183,7 +176,7 @@ def main(args):
             config['fusion'], config['depth'] = config.get('architecture', ('early', 1))
             # Build the model
             self.model = get_model_from_dict(config).to(device)
-            
+
             lr = config.get('lr', 0.001)
             # Optimizer
             optim = config.get('optim', 'sgd')
@@ -191,7 +184,7 @@ def main(args):
                 self.optimizer = SGD(self.model.parameters(), lr=lr, momentum=0.9)
             elif optim == 'adam':
                 self.optimizer = Adam(self.model.parameters(), lr=lr)
-            
+
             # LR Scheduler
             lr_schedule = config.get('lr_schedule', 'fixed')
             if lr_schedule == 'fixed':
@@ -200,10 +193,10 @@ def main(args):
                 self.scheduler = CyclicLR(self.optimizer, base_lr=(lr / 100), max_lr=lr, mode='triangular2')
             elif lr_schedule == 'plateau':
                 self.scheduler = ReduceLROnPlateau(self.optimizer, patience=config.get('patience'))
-                
+
         def _train(self):
             metrics = {}
-            
+
             # Prepare Data
             features = h5py.File(DATA_PATHS[args.data], 'r')['data']
             train_data = (features, 0, 750 * (10 ** 3))
@@ -214,13 +207,13 @@ def main(args):
 
             metrics.update(train_metrics)
             metrics.update(test_metrics)
-            
+
             if self.config.get('lr_schedule', 'fixed') == 'plateau':
                 loss = self.config.get('loss', 'mse')
-                self.scheduler.step(metrics[loss])           
+                self.scheduler.step(metrics[loss])
 
             return metrics
-            
+
         def _save(self, checkpoint_dir):
             checkpoint = {
                 'model': self.model.state_dict(),
@@ -239,17 +232,8 @@ def main(args):
             self.scheduler.load_state_dict(checkpoint['scheduler'])
 
 
-    #search_space = {
-    #    'depth': hp.choice('depth', (1, 2, 4)),
-    #    'fusion': hp.choice('fusion', ('early', 'mid', 'late')),
-    #    'loss': hp.choice('loss', ('mse', 'sml1')),  # ('mse', 'mape', 'mae', 'sml1')
-    #    'optim': hp.choice('optim', ('sgd', 'adam')),
-    #    'lr': hp.loguniform('lr', -5, -1),
-    #}
-
     grid_search_space = {
-#        'dim': tune.grid_search([2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]),
-        'dim': 128, #tune.grid_search([256, 512, 1024, 2048, 4096]),
+        'dim': tune.grid_search([2, 4, 8, 16, 32, 64, 128]), #, 256, 512, 1024, 2048, 4096]),
         'architecture': tune.grid_search([
             ('early', 1),
             ('early', 2),
@@ -259,69 +243,48 @@ def main(args):
             ('late', 1),
             ('late', 2),
             ('late', 4)
-        ]),
-        #'depth': tune.grid_search([1, 2, 4]),
-        #'fusion': tune.grid_search(['early', 'mid', 'late']),
-        'loss': 'sml1', # tune.grid_search(['sml1']),  # ('mse', 'mape', 'mae', 'sml1')
-        'optim': 'sgd', # hp.choice('optim', ('sgd', 'adam')),
-        'lr': 0.05 #tune.grid_search([0.01, 0.05, 0.1])
+        ])
     }
 
     config = {
         'device': args.device,
-        'batch_size': 50,  # scope.int(hp.quniform('batch_size', 16, 512, 16)),
+        'batch_size': 50,
         'accumulate': 100,
         'iterations': 100,
         'val_iterations': 20,
-        'batch_norm': True, #hp.choice('batch_norm', (True,)),
-        'dropout': 0, # hp.choice('dropout', (0,)),
-        'patience': 20,  # scope.int(hp.quniform('patience', 20, 100, 5)),        
-        'lr_schedule': 'plateau', # hp.choice('lrschedule', ('plateau',)),
+        'batch_norm': True,
+        'dropout': 0,
+        'patience': 20,
+        'lr_schedule': 'plateau',
+        'loss': 'sml1',
+        'optim': 'sgd',
+        'lr': 0.05,
         **grid_search_space
     }
 
-    # pbt_search_space = {
-    #     'lr': hp.loguniform('lr', -5, -1),
-    # }
-
-   #scheduler=PopulationBasedTraining(
-                        #    time_attr="training_iteration",
-                        #    metric="mape", mode="min",
-                        #    perturbation_interval=5,
-                        #    hyperparam_mutations=pbt_search_space
-                        #),
-
     ray.init(num_cpus=6, num_gpus=1, memory=6*1024**3, object_store_memory=6*1024**3, redis_max_memory=2*1024**3,
              include_webui=False)
-    name = 'grid_128'
-    # search_alg = HyperOptSearch(search_space, metric="mape", mode='min')
-    # search_alg = ConcurrencyLimiter(search_alg, max_concurrent=10)
-    # scheduler = ASHAScheduler(metric="mape", mode='min', grace_period=5)
 
     def stop_condition(trial_id, report):
         return math.isnan(report['mape']) or report['training_iteration'] > 100
 
-    analysis = tune.run(regressor, name=name, local_dir=args.rundir,
-                        # num_samples=50, search_alg=search_alg, scheduler=scheduler,
+    analysis = tune.run(regressor, name='arch-search', local_dir=args.rundir,
                         keep_checkpoints_num=1, checkpoint_score_attr='min-mape', checkpoint_freq=1,
-                        stop=stop_condition, # stop={"training_iteration": 100},
+                        stop=stop_condition,
                         resources_per_trial={'cpu': 6, 'gpu': 1},
                         raise_on_failed_trial=False,
                         with_server=False, queue_trials=True,
                         config=config, resume=args.resume)
 
-    analysis.dataframe().to_csv(f'ray-128-results-grid.csv')
-    # ckpt_dir = analysis.get_best_logdir('mape', mode='min')
-    # print(ckpt_dir)
+    analysis.dataframe().to_csv(f'results.csv')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train Distance Estimation from Pivot Distances',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     # Data params
     parser.add_argument('data', choices=('yfcc100m-hybridfc6',), help='dataset for training')
-    # parser.add_argument('dim', type=int, default=200, help='Final dimensionality (also number of pivots)')
     parser.add_argument('-s', '--seed', type=int, default=23, help='Random initial seed')
-    
+
     # Other
     parser.add_argument('-r', '--rundir', type=str, default='runs/', help='Base dir for runs')
     parser.add_argument('--resume', action='store_true', help='Resume ray job')
@@ -329,7 +292,7 @@ if __name__ == '__main__':
 
     parser.set_defaults(cuda=True, resume=False)
     args = parser.parse_args()
-    
+
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
