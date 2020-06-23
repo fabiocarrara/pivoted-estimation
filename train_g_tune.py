@@ -1,5 +1,6 @@
 import argparse
 import h5py
+import math
 import numpy as np
 import os
 
@@ -14,8 +15,10 @@ from tqdm import trange
 from hyperopt import hp
 from hyperopt.pyll.base import scope
 
+import ray
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
+from ray.tune.suggest import ConcurrencyLimiter
 from ray.tune.suggest.hyperopt import HyperOptSearch
 
 from model_g import get_model_from_dict
@@ -173,10 +176,11 @@ def main(args):
         def _setup(self, config):
             self.config = config
             
-            device = config.get('device', 'cpu')
+            device = config.get('device', 'cuda')
             dim = config.get('dim', 64)
             batch_size = config.get('batch_size', 50)
 
+            config['fusion'], config['depth'] = config.get('architecture', ('early', 1))
             # Build the model
             self.model = get_model_from_dict(config).to(device)
             
@@ -235,15 +239,36 @@ def main(args):
             self.scheduler.load_state_dict(checkpoint['scheduler'])
 
 
-    search_space = {
-        'depth': hp.choice('depth', (1, 2, 4)),
-        'fusion': hp.choice('fusion', ('early', 'mid', 'late')),
-        'loss': hp.choice('loss', ('mse', 'sml1')),  # ('mse', 'mape', 'mae', 'sml1')
-        'optim': hp.choice('optim', ('sgd', 'adam')),
-        'lr': hp.loguniform('lr', -5, -1),
+    #search_space = {
+    #    'depth': hp.choice('depth', (1, 2, 4)),
+    #    'fusion': hp.choice('fusion', ('early', 'mid', 'late')),
+    #    'loss': hp.choice('loss', ('mse', 'sml1')),  # ('mse', 'mape', 'mae', 'sml1')
+    #    'optim': hp.choice('optim', ('sgd', 'adam')),
+    #    'lr': hp.loguniform('lr', -5, -1),
+    #}
+
+    grid_search_space = {
+#        'dim': tune.grid_search([2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]),
+        'dim': 128, #tune.grid_search([256, 512, 1024, 2048, 4096]),
+        'architecture': tune.grid_search([
+            ('early', 1),
+            ('early', 2),
+            ('early', 4),
+            ('mid', 2),
+            ('mid', 4),
+            ('late', 1),
+            ('late', 2),
+            ('late', 4)
+        ]),
+        #'depth': tune.grid_search([1, 2, 4]),
+        #'fusion': tune.grid_search(['early', 'mid', 'late']),
+        'loss': 'sml1', # tune.grid_search(['sml1']),  # ('mse', 'mape', 'mae', 'sml1')
+        'optim': 'sgd', # hp.choice('optim', ('sgd', 'adam')),
+        'lr': 0.05 #tune.grid_search([0.01, 0.05, 0.1])
     }
-    
+
     config = {
+        'device': args.device,
         'batch_size': 50,  # scope.int(hp.quniform('batch_size', 16, 512, 16)),
         'accumulate': 100,
         'iterations': 100,
@@ -252,49 +277,57 @@ def main(args):
         'dropout': 0, # hp.choice('dropout', (0,)),
         'patience': 20,  # scope.int(hp.quniform('patience', 20, 100, 5)),        
         'lr_schedule': 'plateau', # hp.choice('lrschedule', ('plateau',)),
+        **grid_search_space
     }
 
     # pbt_search_space = {
     #     'lr': hp.loguniform('lr', -5, -1),
     # }
 
-    name = f'n_pivots-{args.dim}'
-    analysis = tune.run(regressor, name=name, local_dir=args.rundir,
-                        num_samples=50,
-                        search_alg=HyperOptSearch(search_space, metric="mape", mode='min'),
-                        scheduler=ASHAScheduler(metric="mape", mode='min'),
-                        checkpoint_freq=1,
-                        checkpoint_score_attr='min-mape',
-                        stop={"training_iteration": 100},
-                        # scheduler=PopulationBasedTraining(
+   #scheduler=PopulationBasedTraining(
                         #    time_attr="training_iteration",
                         #    metric="mape", mode="min",
                         #    perturbation_interval=5,
                         #    hyperparam_mutations=pbt_search_space
                         #),
-                        resources_per_trial={'cpu': 4, 'gpu': 0.33},
-                        raise_on_failed_trial=False,
-                        config=config,
-                        resume=True,
-                        )
 
-    analysis.dataframe().to_csv(f'ray-{name}-results.csv')
-    ckpt_dir = analysis.get_best_logdir('mape', mode='min')
-    print(ckpt_dir)
+    ray.init(num_cpus=6, num_gpus=1, memory=6*1024**3, object_store_memory=6*1024**3, redis_max_memory=2*1024**3,
+             include_webui=False)
+    name = 'grid_128'
+    # search_alg = HyperOptSearch(search_space, metric="mape", mode='min')
+    # search_alg = ConcurrencyLimiter(search_alg, max_concurrent=10)
+    # scheduler = ASHAScheduler(metric="mape", mode='min', grace_period=5)
+
+    def stop_condition(trial_id, report):
+        return math.isnan(report['mape']) or report['training_iteration'] > 100
+
+    analysis = tune.run(regressor, name=name, local_dir=args.rundir,
+                        # num_samples=50, search_alg=search_alg, scheduler=scheduler,
+                        keep_checkpoints_num=1, checkpoint_score_attr='min-mape', checkpoint_freq=1,
+                        stop=stop_condition, # stop={"training_iteration": 100},
+                        resources_per_trial={'cpu': 6, 'gpu': 1},
+                        raise_on_failed_trial=False,
+                        with_server=False, queue_trials=True,
+                        config=config, resume=args.resume)
+
+    analysis.dataframe().to_csv(f'ray-128-results-grid.csv')
+    # ckpt_dir = analysis.get_best_logdir('mape', mode='min')
+    # print(ckpt_dir)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train Distance Estimation from Pivot Distances',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     # Data params
     parser.add_argument('data', choices=('yfcc100m-hybridfc6',), help='dataset for training')
-    parser.add_argument('dim', type=int, default=200, help='Final dimensionality (also number of pivots)')
+    # parser.add_argument('dim', type=int, default=200, help='Final dimensionality (also number of pivots)')
     parser.add_argument('-s', '--seed', type=int, default=23, help='Random initial seed')
     
     # Other
     parser.add_argument('-r', '--rundir', type=str, default='runs/', help='Base dir for runs')
+    parser.add_argument('--resume', action='store_true', help='Resume ray job')
     parser.add_argument('--no-cuda', action='store_false', dest='cuda', help='Run without CUDA')
 
-    parser.set_defaults(cuda=True)
+    parser.set_defaults(cuda=True, resume=False)
     args = parser.parse_args()
     
     np.random.seed(args.seed)
